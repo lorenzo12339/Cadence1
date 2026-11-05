@@ -6,12 +6,14 @@
    Pour chaque nouvelle version publiée : change SW_VERSION ci-dessous.
    Les données (habitudes, validations…) ne sont jamais stockées ici.
    ===================================================================== */
-const SW_VERSION = '1.1.0';
+const SW_VERSION = '1.2.0';
 const CACHE = 'cadence-app-v2';
 const META_CACHE = 'cadence-meta-v2';
 const SCOPE = self.registration.scope;
 const SCOPE_PATH = new URL(SCOPE).pathname;
 const INDEX = new URL('./index.html', SCOPE).href;
+/* Version précédente de l’app, gardée en secours : servie à l’adresse precedente.html. */
+const PREV = new URL('./precedente.html', SCOPE).href;
 const ASSETS = [
   './index.html',
   './manifest.webmanifest',
@@ -19,11 +21,19 @@ const ASSETS = [
   './icon-512.png',
   './icon-maskable-512.png',
   './apple-touch-icon.png',
+  './precedente.html',
 ].map((u) => new URL(u, SCOPE).href);
 
 const versionOf = (html) => {
   const m = /<meta name="app-version" content="([^"]+)"/.exec(html || '');
   return m ? m[1] : null;
+};
+/* Vrai si la version a est plus récente que b (« 1.10.0 » > « 1.9.2 »). */
+const newer = (a, b) => {
+  const p = (v) => String(v || '0').split('.').map((n) => parseInt(n, 10) || 0);
+  const x = p(a); const y = p(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
 };
 async function readMeta() {
   try {
@@ -41,6 +51,15 @@ async function notify(msg) {
   list.forEach((client) => client.postMessage(msg));
 }
 
+/* Garde l’ancienne page de l’app : si une mise à jour pose problème, elle reste
+   ouvrable hors ligne, avec les mêmes données (même base, même adresse). */
+async function keepPrevious(text) {
+  try {
+    const c = await caches.open(META_CACHE);
+    await c.put(PREV, new Response(text, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }));
+  } catch (e) { /* ignore */ }
+}
+
 /* Télécharge index.html ; s’il a changé, le met en cache et note l’heure. */
 async function refreshIndex() {
   const cache = await caches.open(CACHE);
@@ -51,6 +70,7 @@ async function refreshIndex() {
   if (!res || !res.ok) return { ok: false };
   const text = await res.clone().text();
   if (oldText !== null && text === oldText) return { ok: true, changed: false };
+  if (oldText !== null) await keepPrevious(oldText);
   await cache.put(INDEX, res);
   const meta = await readMeta();
   if (oldText !== null) {
@@ -67,7 +87,7 @@ async function refreshIndex() {
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
-    const old = await cache.match(INDEX);
+    const old = await caches.match(INDEX);
     const oldText = old ? await old.text() : null;
     await Promise.all(ASSETS.map(async (u) => {
       try { const r = await fetch(u, { cache: 'reload' }); if (r.ok) await cache.put(u, r); } catch (e) { /* hors ligne */ }
@@ -75,7 +95,7 @@ self.addEventListener('install', (event) => {
     const fresh = await cache.match(INDEX);
     const newText = fresh ? await fresh.text() : null;
     const meta = await readMeta();
-    if (oldText !== null && newText !== null && newText !== oldText) meta.updatedAt = Date.now();
+    if (oldText !== null && newText !== null && newText !== oldText) { meta.updatedAt = Date.now(); await keepPrevious(oldText); }
     meta.version = versionOf(newText) || meta.version;
     await writeMeta(meta);
     await self.skipWaiting();
@@ -92,6 +112,12 @@ self.addEventListener('activate', (event) => {
   })());
 });
 
+const noPrevious = () => new Response(
+  '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cadence</title>'
+  + '<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#0A0A09;color:#F2F1EC;font:16px system-ui;text-align:center;padding:24px">'
+  + '<div><p style="font-size:20px;font-weight:700">Pas de version précédente</p><p style="color:#B4B2A9">Elle est gardée à la première mise à jour installée.</p><p><a style="color:#FFD60A" href="./">Revenir à Cadence</a></p></div></body>',
+  { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+);
 const offlinePage = () => new Response(
   '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cadence</title>'
   + '<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#0A0A09;color:#F2F1EC;font:16px system-ui;text-align:center;padding:24px">'
@@ -105,6 +131,25 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.endsWith('/sw.js')) return;
+  if (url.pathname === SCOPE_PATH + 'precedente.html') {
+    /* Deux sources : le fichier precedente.html publié avec l’app (préparé pour servir de
+       secours) et la page gardée lors de la dernière mise à jour. On sert la plus récente
+       des deux ; à version égale, le fichier publié. Sinon, une page d’explication. */
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      let shipped = await cache.match(PREV);
+      if (!shipped) {
+        try { const r = await fetch(req); if (r.ok && versionOf(await r.clone().text())) { await cache.put(PREV, r.clone()); shipped = r; } } catch (e) { /* hors ligne */ }
+      }
+      const kept = await (await caches.open(META_CACHE)).match(PREV);
+      if (shipped && kept) {
+        const [a, b] = await Promise.all([shipped.clone().text(), kept.clone().text()]);
+        return newer(versionOf(b), versionOf(a)) ? kept : shipped;
+      }
+      return shipped || kept || noPrevious();
+    })());
+    return;
+  }
   const isShell = url.pathname === SCOPE_PATH || url.pathname === SCOPE_PATH + 'index.html';
   if (req.mode === 'navigate' || isShell) {
     if (!isShell) return; /* autres pages du site : réseau normal */

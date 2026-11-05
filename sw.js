@@ -6,9 +6,9 @@
    Pour chaque nouvelle version publiée : change SW_VERSION ci-dessous.
    Les données (habitudes, validations…) ne sont jamais stockées ici.
    ===================================================================== */
-const SW_VERSION = '1.0.0';
-const CACHE = 'cadence-app-v1';
-const META_CACHE = 'cadence-meta-v1';
+const SW_VERSION = '1.1.0';
+const CACHE = 'cadence-app-v2';
+const META_CACHE = 'cadence-meta-v2';
 const SCOPE = self.registration.scope;
 const SCOPE_PATH = new URL(SCOPE).pathname;
 const INDEX = new URL('./index.html', SCOPE).href;
